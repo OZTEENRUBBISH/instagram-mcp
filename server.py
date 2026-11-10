@@ -72,6 +72,27 @@ else:
 # MCP server name = account name so Claude's tool picker shows the right label
 mcp = FastMCP(ACCOUNT_NAME)
 
+# Accounts this server may post to: username -> Instagram user ID. The default account comes
+# from IG_USER_ID; extra accounts are listed in accounts.json next to this file. Anything
+# not listed here is refused, so the server can never post to another profile.
+import json as _json
+DEFAULT_ACCOUNT = os.environ.get("ACCOUNT_USERNAME", "studycrestapp")
+ACCOUNTS = {DEFAULT_ACCOUNT: IG_USER_ID}
+_acc_file = Path(__file__).parent / "accounts.json"
+if _acc_file.exists():
+    ACCOUNTS.update({k.lower().lstrip("@"): str(v) for k, v in _json.loads(_acc_file.read_text()).items()})
+
+AccountArg = Annotated[str, Field(default="", description="Instagram username to act on, e.g. 'studycrestapp' or 'studycrestbusiness'. Empty = the default account (studycrestapp). Only allowlisted accounts work.")]
+
+
+def _base(account: str = "") -> str:
+    name = (account or DEFAULT_ACCOUNT).lower().lstrip("@")
+    if name not in ACCOUNTS:
+        raise ValueError(f"Account '{name}' is not on this server's allowlist ({', '.join(sorted(ACCOUNTS))}). Nothing was posted.")
+    if API_FLOW != "facebook_login":
+        return "/me"
+    return f"/{ACCOUNTS[name]}"
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Internal helpers
@@ -125,7 +146,7 @@ def _wait_for_container(client: httpx.Client, container_id: str, max_wait_s: int
 # ────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def get_account_info() -> dict:
+def get_account_info(account: AccountArg = "") -> dict:
     """Fetch basic info about the connected Instagram Business account.
 
     Use this first to verify the token and IG user ID are valid. Returns username,
@@ -133,7 +154,7 @@ def get_account_info() -> dict:
     """
     with _client() as client:
         resp = client.get(
-            f"{GRAPH}{BASE}",
+            f"{GRAPH}{_base(account)}",
             params={
                 "fields": "username,name,biography,followers_count,follows_count,media_count,profile_picture_url",
                 "access_token": ACCESS_TOKEN,
@@ -146,6 +167,7 @@ def get_account_info() -> dict:
 def publish_photo(
     image_url: Annotated[str, Field(description="PUBLIC https URL of the image. Must be JPEG, < 8MB, accessible without auth.")],
     caption: Annotated[str, Field(default="", max_length=2200, description="Caption with hashtags. Max 30 hashtags.")] = "",
+    account: AccountArg = "",
 ) -> dict:
     """Publish a single photo to the Instagram feed.
 
@@ -156,7 +178,7 @@ def publish_photo(
     with _client() as client:
         # Step 1: create container
         resp = client.post(
-            f"{GRAPH}{BASE}/media",
+            f"{GRAPH}{_base(account)}/media",
             params={
                 "image_url": image_url,
                 "caption": caption,
@@ -171,7 +193,7 @@ def publish_photo(
 
         # Step 2: publish
         resp = client.post(
-            f"{GRAPH}{BASE}/media_publish",
+            f"{GRAPH}{_base(account)}/media_publish",
             params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
         )
         published = _check(resp, "publish_photo (publish)")
@@ -192,6 +214,7 @@ def publish_reel(
     caption: Annotated[str, Field(default="", max_length=2200, description="Caption with hashtags")] = "",
     share_to_feed: Annotated[bool, Field(default=True, description="Also show in main feed grid")] = True,
     cover_url: Annotated[str, Field(default="", description="Optional PUBLIC https URL of a JPEG cover image for the Reel (9:16).")] = "",
+    account: AccountArg = "",
 ) -> dict:
     """Publish a Reel to Instagram.
 
@@ -201,7 +224,7 @@ def publish_reel(
     with _client() as client:
         # Step 1: create reel container
         resp = client.post(
-            f"{GRAPH}{BASE}/media",
+            f"{GRAPH}{_base(account)}/media",
             params={
                 "media_type": "REELS",
                 "video_url": video_url,
@@ -219,7 +242,7 @@ def publish_reel(
 
         # Step 2: publish
         resp = client.post(
-            f"{GRAPH}{BASE}/media_publish",
+            f"{GRAPH}{_base(account)}/media_publish",
             params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
         )
         published = _check(resp, "publish_reel (publish)")
@@ -237,6 +260,7 @@ def publish_reel(
 def publish_carousel(
     image_urls: Annotated[list[str], Field(min_length=2, max_length=10, description="2-10 PUBLIC image URLs. Must all be accessible JPEGs.")],
     caption: Annotated[str, Field(default="", max_length=2200, description="Caption applied to the whole carousel")] = "",
+    account: AccountArg = "",
 ) -> dict:
     """Publish a carousel (multi-image) post. Accepts 2-10 images.
 
@@ -248,7 +272,7 @@ def publish_carousel(
         children: list[str] = []
         for url in image_urls:
             resp = client.post(
-                f"{GRAPH}{BASE}/media",
+                f"{GRAPH}{_base(account)}/media",
                 params={
                     "image_url": url,
                     "is_carousel_item": True,
@@ -260,7 +284,7 @@ def publish_carousel(
 
         # Step 2: create carousel container
         resp = client.post(
-            f"{GRAPH}{BASE}/media",
+            f"{GRAPH}{_base(account)}/media",
             params={
                 "media_type": "CAROUSEL",
                 "children": ",".join(children),
@@ -275,7 +299,7 @@ def publish_carousel(
 
         # Step 3: publish
         resp = client.post(
-            f"{GRAPH}{BASE}/media_publish",
+            f"{GRAPH}{_base(account)}/media_publish",
             params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
         )
         published = _check(resp, "publish_carousel (publish)")
