@@ -68,7 +68,7 @@ else:
     DM_BASE = "/me"
 
 # Hardened: the MCP endpoint lives at a secret path (MCP_SECRET), so only someone who
-# knows the full URL can call it. Only publishing tools are exposed.
+# knows the full URL can call it. Publishing tools plus one read-only dashboard tool are exposed.
 # MCP server name = account name so Claude's tool picker shows the right label
 mcp = FastMCP(ACCOUNT_NAME)
 
@@ -287,6 +287,151 @@ def publish_carousel(
         )
         info = _check(resp, "publish_carousel (get permalink)")
         return {"post_id": post_id, "permalink": info.get("permalink", ""), "image_count": len(image_urls)}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Tools — Read-only dashboard data (insights, comments, messages)
+# ────────────────────────────────────────────────────────────────────────────
+
+_DASH_CACHE: dict = {"at": 0.0, "data": None}
+
+
+def _safe(e: Exception) -> str:
+    """Error text that can never contain the access token."""
+    msg = f"{type(e).__name__}: {e}"
+    if ACCESS_TOKEN:
+        msg = msg.replace(ACCESS_TOKEN, "***")
+    return msg[:400]
+
+
+def _get(client: httpx.Client, path: str, params: dict, context: str) -> dict:
+    return _check(client.get(f"{GRAPH}{path}", params={**params, "access_token": ACCESS_TOKEN}), context)
+
+
+@mcp.tool()
+def get_dashboard(
+    max_media: Annotated[int, Field(default=100, ge=1, le=100, description="How many of the newest posts to include.")] = 100,
+) -> dict:
+    """READ-ONLY. One call with everything a statistics screen needs.
+
+    Returns: account totals; the newest posts, each with lifetime views, likes, comments,
+    shares and saves (and follows where Instagram reports it); recent comments; recent
+    direct-message conversations. Each section reports its own error instead of failing
+    the whole call, so a missing permission only blanks that section. Results are cached
+    for 10 minutes. Never writes, replies, hides or deletes anything.
+    """
+    if _DASH_CACHE["data"] is not None and time.time() - _DASH_CACHE["at"] < 600:
+        return _DASH_CACHE["data"]
+
+    out: dict = {"fetched_at": int(time.time()), "account_name": ACCOUNT_NAME}
+    with _client() as client:
+        try:
+            out["account"] = _get(client, BASE, {"fields": "username,followers_count,follows_count,media_count"}, "account")
+        except Exception as e:
+            out["account_error"] = _safe(e)
+
+        media: list[dict] = []
+        try:
+            data = _get(
+                client, f"{BASE}/media",
+                {"fields": "id,media_type,media_product_type,timestamp,permalink,like_count,comments_count", "limit": max_media},
+                "media list",
+            )
+            media = data.get("data", [])[:max_media]
+        except Exception as e:
+            out["media_error"] = _safe(e)
+
+        insights_error = ""
+        posts = []
+        for m in media:
+            row = {
+                "id": m.get("id"),
+                "type": m.get("media_product_type") or m.get("media_type"),
+                "timestamp": m.get("timestamp"),
+                "permalink": m.get("permalink"),
+                "likes": m.get("like_count"),
+                "comments": m.get("comments_count"),
+                "views": None, "shares": None, "saves": None, "follows": None,
+                "insights": False,
+            }
+            if not insights_error:
+                try:
+                    ins = _get(client, f"/{m['id']}/insights", {"metric": "views,likes,comments,shares,saved"}, "media insights")
+                    for item in ins.get("data", []):
+                        vals = item.get("values") or [{}]
+                        v = vals[0].get("value")
+                        key = {"saved": "saves"}.get(item.get("name"), item.get("name"))
+                        if key in row and isinstance(v, (int, float)):
+                            row[key] = v
+                    row["insights"] = True
+                except Exception as e:
+                    msg = _safe(e)
+                    # A permission problem will repeat for every post: stop asking after the first.
+                    if "permission" in msg.lower() or "(code 10" in msg or "(code 200" in msg or "(code 190" in msg:
+                        insights_error = msg
+                    else:
+                        row["insights_error"] = msg
+                if row["insights"] and row["type"] != "REELS":
+                    try:
+                        ins = _get(client, f"/{m['id']}/insights", {"metric": "follows"}, "media follows")
+                        for item in ins.get("data", []):
+                            v = (item.get("values") or [{}])[0].get("value")
+                            if isinstance(v, (int, float)):
+                                row["follows"] = v
+                    except Exception:
+                        pass
+            posts.append(row)
+        out["posts"] = posts
+        if insights_error:
+            out["insights_error"] = insights_error
+
+        comments: list[dict] = []
+        comments_error = ""
+        for m in [x for x in media if (x.get("comments_count") or 0) > 0][:10]:
+            try:
+                c = _get(client, f"/{m['id']}/comments", {"fields": "id,text,username,timestamp", "limit": 10}, "comments")
+                for item in c.get("data", []):
+                    comments.append({
+                        "id": item.get("id"),
+                        "from": item.get("username", ""),
+                        "text": (item.get("text") or "")[:300],
+                        "at": item.get("timestamp"),
+                        "permalink": m.get("permalink"),
+                    })
+            except Exception as e:
+                comments_error = _safe(e)
+                break
+        comments.sort(key=lambda x: x.get("at") or "", reverse=True)
+        out["comments"] = comments[:20]
+        if comments_error:
+            out["comments_error"] = comments_error
+
+        try:
+            conv = _get(
+                client, f"{DM_BASE}/conversations",
+                {"platform": "instagram", "fields": "id,updated_time,participants,messages.limit(1){id,from,message,created_time}", "limit": 10},
+                "messages",
+            )
+            me = (out.get("account") or {}).get("username", "")
+            msgs = []
+            for cv in conv.get("data", []):
+                last = ((cv.get("messages") or {}).get("data") or [{}])[0]
+                sender = (last.get("from") or {}).get("username", "")
+                others = [p.get("username", "") for p in ((cv.get("participants") or {}).get("data") or []) if p.get("username") != me]
+                msgs.append({
+                    "id": last.get("id") or cv.get("id"),
+                    "with": others[0] if others else "",
+                    "from": sender,
+                    "from_me": bool(me) and sender == me,
+                    "text": (last.get("message") or "")[:300],
+                    "at": last.get("created_time") or cv.get("updated_time"),
+                })
+            out["messages"] = msgs
+        except Exception as e:
+            out["messages_error"] = _safe(e)
+
+    _DASH_CACHE.update(at=time.time(), data=out)
+    return out
 
 
 if __name__ == "__main__":
