@@ -341,6 +341,23 @@ def get_dashboard(
         except Exception as e:
             out["media_error"] = _safe(e)
 
+        # Totals that also count engagement on promoted/boosted/ad versions of each post.
+        # Meta only serves these from the Facebook-side API, so this may be refused.
+        ad_totals: dict = {}
+        try:
+            fb = _check(
+                client.get(
+                    f"https://graph.facebook.com/v27.0/{IG_USER_ID}/media",
+                    params={"fields": "id,permalink,total_like_count,total_comments_count,total_views_count", "limit": max_media, "access_token": ACCESS_TOKEN},
+                ),
+                "ad-inclusive totals",
+            )
+            for x in fb.get("data", []):
+                ad_totals[x.get("permalink") or x.get("id")] = x
+                ad_totals[x.get("id")] = x
+        except Exception as e:
+            out["ad_totals_error"] = _safe(e)
+
         insights_error = ""
         posts = []
         for m in media:
@@ -354,6 +371,10 @@ def get_dashboard(
                 "views": None, "shares": None, "saves": None, "follows": None,
                 "insights": False,
             }
+            tot = ad_totals.get(m.get("permalink")) or ad_totals.get(m.get("id")) or {}
+            row["total_likes"] = tot.get("total_like_count")
+            row["total_comments"] = tot.get("total_comments_count")
+            row["total_views"] = tot.get("total_views_count")
             if not insights_error:
                 try:
                     ins = _get(client, f"/{m['id']}/insights", {"metric": "views,likes,comments,shares,saved"}, "media insights")
