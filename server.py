@@ -191,6 +191,7 @@ def publish_reel(
     video_url: Annotated[str, Field(description="PUBLIC https URL of an MP4 video. Must be < 1GB, < 90 seconds, accessible without auth.")],
     caption: Annotated[str, Field(default="", max_length=2200, description="Caption with hashtags")] = "",
     share_to_feed: Annotated[bool, Field(default=True, description="Also show in main feed grid")] = True,
+    cover_url: Annotated[str, Field(default="", description="Optional PUBLIC https URL of a JPEG cover image for the Reel (9:16).")] = "",
 ) -> dict:
     """Publish a Reel to Instagram.
 
@@ -207,6 +208,7 @@ def publish_reel(
                 "caption": caption,
                 "share_to_feed": share_to_feed,
                 "access_token": ACCESS_TOKEN,
+                **({"cover_url": cover_url} if cover_url else {}),
             },
         )
         container = _check(resp, "publish_reel (create container)")
