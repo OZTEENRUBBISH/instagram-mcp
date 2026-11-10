@@ -10,6 +10,10 @@ services:
         sync: false
       - key: IG_USER_ID
         sync: false
+      - key: MCP_SECRET
+        sync: false
+      - key: API_FLOW
+        sync: false
       - key: MCP_TRANSPORT
         value: http
       - key: PORT
