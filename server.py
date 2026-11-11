@@ -85,8 +85,22 @@ if _acc_file.exists():
 AccountArg = Annotated[str, Field(default="", description="Instagram username to act on, e.g. 'studycrestapp' or 'studycrestbusiness'. Empty = the default account (studycrestapp). Only allowlisted accounts work.")]
 
 
+import contextvars as _cv
+_TOKEN = _cv.ContextVar("token", default=None)
+
+
+def _tok() -> str:
+    """Token for the account selected by the last _base() call in this request."""
+    return _TOKEN.get() or ACCESS_TOKEN
+
+
 def _base(account: str = "") -> str:
     name = (account or DEFAULT_ACCOUNT).lower().lstrip("@")
+    # Each extra account has its own token in META_ACCESS_TOKEN_<USERNAME>; the default uses META_ACCESS_TOKEN.
+    own = os.environ.get("META_ACCESS_TOKEN_" + name.upper())
+    if name in ACCOUNTS and name != DEFAULT_ACCOUNT and not own:
+        raise ValueError(f"Account '{name}' is not connected yet: its access token (META_ACCESS_TOKEN_{name.upper()}) is not set on the server. Nothing was posted.")
+    _TOKEN.set(own or ACCESS_TOKEN)
     if name not in ACCOUNTS:
         raise ValueError(f"Account '{name}' is not on this server's allowlist ({', '.join(sorted(ACCOUNTS))}). Nothing was posted.")
     if API_FLOW != "facebook_login":
@@ -129,7 +143,7 @@ def _wait_for_container(client: httpx.Client, container_id: str, max_wait_s: int
     while time.time() - start < max_wait_s:
         resp = client.get(
             f"{GRAPH}/{container_id}",
-            params={"fields": "status_code,status", "access_token": ACCESS_TOKEN},
+            params={"fields": "status_code,status", "access_token": _tok()},
         )
         data = _check(resp, "Container status check")
         status = data.get("status_code", "")
@@ -157,7 +171,7 @@ def get_account_info(account: AccountArg = "") -> dict:
             f"{GRAPH}{_base(account)}",
             params={
                 "fields": "username,name,biography,followers_count,follows_count,media_count,profile_picture_url",
-                "access_token": ACCESS_TOKEN,
+                "access_token": _tok(),
             },
         )
         return _check(resp, "get_account_info")
@@ -182,7 +196,7 @@ def publish_photo(
             params={
                 "image_url": image_url,
                 "caption": caption,
-                "access_token": ACCESS_TOKEN,
+                "access_token": _tok(),
             },
         )
         container = _check(resp, "publish_photo (create container)")
@@ -194,7 +208,7 @@ def publish_photo(
         # Step 2: publish
         resp = client.post(
             f"{GRAPH}{_base(account)}/media_publish",
-            params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
+            params={"creation_id": container_id, "access_token": _tok()},
         )
         published = _check(resp, "publish_photo (publish)")
         post_id = published["id"]
@@ -202,7 +216,7 @@ def publish_photo(
         # Fetch permalink
         resp = client.get(
             f"{GRAPH}/{post_id}",
-            params={"fields": "permalink", "access_token": ACCESS_TOKEN},
+            params={"fields": "permalink", "access_token": _tok()},
         )
         info = _check(resp, "publish_photo (get permalink)")
         return {"post_id": post_id, "permalink": info.get("permalink", "")}
@@ -230,7 +244,7 @@ def publish_reel(
                 "video_url": video_url,
                 "caption": caption,
                 "share_to_feed": share_to_feed,
-                "access_token": ACCESS_TOKEN,
+                "access_token": _tok(),
                 **({"cover_url": cover_url} if cover_url else {}),
             },
         )
@@ -243,14 +257,14 @@ def publish_reel(
         # Step 2: publish
         resp = client.post(
             f"{GRAPH}{_base(account)}/media_publish",
-            params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
+            params={"creation_id": container_id, "access_token": _tok()},
         )
         published = _check(resp, "publish_reel (publish)")
         post_id = published["id"]
 
         resp = client.get(
             f"{GRAPH}/{post_id}",
-            params={"fields": "permalink", "access_token": ACCESS_TOKEN},
+            params={"fields": "permalink", "access_token": _tok()},
         )
         info = _check(resp, "publish_reel (get permalink)")
         return {"post_id": post_id, "permalink": info.get("permalink", "")}
@@ -276,7 +290,7 @@ def publish_carousel(
                 params={
                     "image_url": url,
                     "is_carousel_item": True,
-                    "access_token": ACCESS_TOKEN,
+                    "access_token": _tok(),
                 },
             )
             child = _check(resp, f"publish_carousel (create child for {url[:50]})")
@@ -289,7 +303,7 @@ def publish_carousel(
                 "media_type": "CAROUSEL",
                 "children": ",".join(children),
                 "caption": caption,
-                "access_token": ACCESS_TOKEN,
+                "access_token": _tok(),
             },
         )
         container = _check(resp, "publish_carousel (create carousel container)")
@@ -300,14 +314,14 @@ def publish_carousel(
         # Step 3: publish
         resp = client.post(
             f"{GRAPH}{_base(account)}/media_publish",
-            params={"creation_id": container_id, "access_token": ACCESS_TOKEN},
+            params={"creation_id": container_id, "access_token": _tok()},
         )
         published = _check(resp, "publish_carousel (publish)")
         post_id = published["id"]
 
         resp = client.get(
             f"{GRAPH}/{post_id}",
-            params={"fields": "permalink", "access_token": ACCESS_TOKEN},
+            params={"fields": "permalink", "access_token": _tok()},
         )
         info = _check(resp, "publish_carousel (get permalink)")
         return {"post_id": post_id, "permalink": info.get("permalink", ""), "image_count": len(image_urls)}
@@ -329,7 +343,7 @@ def _safe(e: Exception) -> str:
 
 
 def _get(client: httpx.Client, path: str, params: dict, context: str) -> dict:
-    return _check(client.get(f"{GRAPH}{path}", params={**params, "access_token": ACCESS_TOKEN}), context)
+    return _check(client.get(f"{GRAPH}{path}", params={**params, "access_token": _tok()}), context)
 
 
 @mcp.tool()
@@ -372,7 +386,7 @@ def get_dashboard(
             fb = _check(
                 client.get(
                     f"https://graph.facebook.com/v27.0/{IG_USER_ID}/media",
-                    params={"fields": "id,permalink,total_like_count,total_comments_count,total_views_count", "limit": max_media, "access_token": ACCESS_TOKEN},
+                    params={"fields": "id,permalink,total_like_count,total_comments_count,total_views_count", "limit": max_media, "access_token": _tok()},
                 ),
                 "ad-inclusive totals",
             )
