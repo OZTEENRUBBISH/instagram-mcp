@@ -96,10 +96,8 @@ def _tok() -> str:
 
 def _base(account: str = "") -> str:
     name = (account or DEFAULT_ACCOUNT).lower().lstrip("@")
-    # Each extra account has its own token in META_ACCESS_TOKEN_<USERNAME>; the default uses META_ACCESS_TOKEN.
+    # An account may have its own token in META_ACCESS_TOKEN_<USERNAME>; otherwise the main token is used.
     own = os.environ.get("META_ACCESS_TOKEN_" + name.upper())
-    if name in ACCOUNTS and name != DEFAULT_ACCOUNT and not own:
-        raise ValueError(f"Account '{name}' is not connected yet: its access token (META_ACCESS_TOKEN_{name.upper()}) is not set on the server. Nothing was posted.")
     _TOKEN.set(own or ACCESS_TOKEN)
     if name not in ACCOUNTS:
         raise ValueError(f"Account '{name}' is not on this server's allowlist ({', '.join(sorted(ACCOUNTS))}). Nothing was posted.")
